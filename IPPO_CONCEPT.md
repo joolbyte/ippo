@@ -166,6 +166,8 @@ The dashboard may be dense, but it should remain legible and responsive. Layouts
 
 The interface should use tasteful terminal-native visual language: monospace text, clear borders and separators, concise status text, progress bars, heatmap cells, and restrained color. It should develop its own identity instead of reproducing init.Habits exactly.
 
+ippo's visual identity is Japanese-inspired without becoming ornamental or themed like a novelty interface. The primary wordmark is `ippo 一歩`, pairing the Latin name with the Japanese characters for “one step.” Its dark palette draws from sumi ink, warm washi paper, vermilion red, moss green, indigo, and restrained gold. Vermilion anchors borders, selection, and emphasis; moss communicates completion; indigo supports secondary structure. This direction should remain calm, compact, and highly legible in real terminals.
+
 ## Contribution graph semantics
 
 The contribution graph is a central product feature. It resembles GitHub's calendar heatmap but represents habit completion quality rather than a binary completed/not-completed state.
@@ -282,6 +284,7 @@ The following are established product decisions:
 - It is free, open source, local-first, offline-capable, and unlimited.
 - It is centered on habits and routines, not goals.
 - The default experience is a responsive dashboard.
+- The visual identity uses the `ippo 一歩` wordmark and a restrained Japanese-inspired sumi, washi, vermilion, moss, indigo, and gold palette.
 - The contribution graph uses completion percentage for intensity.
 - XP and levels exist only for motivation and never unlock features.
 - Writing/reflection is a habit type with a configurable minimum character count and locally stored dated entries.
@@ -294,7 +297,6 @@ The following remain implementation decisions and should not be assumed without 
 - Exact database schema.
 - Exact CLI grammar and keyboard bindings.
 - Exact XP formula, level curve, and streak formula.
-- Exact visual theme and color palette.
 - Packaging and distribution channels.
 - Whether optional synchronization will ever be built.
 
