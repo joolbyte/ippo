@@ -1,0 +1,20 @@
+/target/
+/.ippo-dev/
+
+# Local databases and journals must never be committed.
+*.db
+*.db-shm
+*.db-wal
+
+# Local configuration, logs, and coverage output.
+.env
+.env.*
+!.env.example
+*.log
+*.profraw
+/coverage/
+
+# Editor and operating-system metadata.
+.DS_Store
+.idea/
+.vscode/

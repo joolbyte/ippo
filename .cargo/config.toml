@@ -1,0 +1,2 @@
+[env]
+IPPO_PROFILE = { value = "dev", force = false }
