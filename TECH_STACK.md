@@ -156,6 +156,14 @@ Jiff remains pre-1.0 at the time of selection, so keep its use behind ippo-owned
 
 The database schema must use explicit, ordered migrations. Never silently rebuild or destructively replace a user's database to avoid writing a migration.
 
+The first persistent habit slice establishes a durable separation between:
+
+- Habit definitions, which hold the current identity and lifecycle of a habit.
+- Schedule records, which state when a habit should produce occurrences.
+- Dated occurrence snapshots, which preserve the scheduled civil date, relevant IANA timezone, habit name and type as they existed for that occurrence, and its completion state.
+
+Completion updates must change the dated occurrence, never the habit definition. Daily occurrences are materialized transactionally and uniquely per habit and civil date so reopening ippo is idempotent. This separation is a historical-integrity invariant even as the exact schema expands for additional schedules and habit types.
+
 ## Rusqlite with bundled SQLite
 
 **Role:** Synchronous Rust access to SQLite.

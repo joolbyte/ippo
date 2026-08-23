@@ -72,7 +72,9 @@ fn main() -> Result<()> {
                 println!("{}", diagnostics.human_readable());
             }
         }
-        None => tui::run(&diagnostics).context("ippo could not run its terminal interface")?,
+        None => {
+            tui::run(database, &diagnostics).context("ippo could not run its terminal interface")?
+        }
     }
 
     Ok(())

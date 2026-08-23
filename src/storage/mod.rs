@@ -6,10 +6,13 @@ use std::{
     str::FromStr,
 };
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
-use crate::config::DataEnvironment;
+use crate::{
+    config::DataEnvironment,
+    habit::{HabitName, TodayHabit},
+};
 
 const ENVIRONMENT_KEY: &str = "data_environment";
 
@@ -103,6 +106,123 @@ impl Database {
         )?)
     }
 
+    pub fn create_daily_binary_habit(
+        &mut self,
+        name: &HabitName,
+        starts_on: &str,
+        timezone: &str,
+        now_utc: &str,
+    ) -> Result<(), DatabaseError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO habits (name, habit_type, created_at_utc)
+             VALUES (?1, 'binary', ?2)",
+            (name.as_str(), now_utc),
+        )?;
+        let habit_id = transaction.last_insert_rowid();
+
+        transaction.execute(
+            "INSERT INTO habit_schedules (
+                 habit_id, schedule_kind, starts_on, created_timezone, created_at_utc
+             ) VALUES (?1, 'daily', ?2, ?3, ?4)",
+            params![habit_id, starts_on, timezone, now_utc],
+        )?;
+        let schedule_id = transaction.last_insert_rowid();
+
+        transaction.execute(
+            "INSERT INTO habit_occurrences (
+                 schedule_id, habit_id, scheduled_date, timezone, habit_name, habit_type,
+                 completed, completed_at_utc, created_at_utc, updated_at_utc
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'binary', 0, NULL, ?6, ?6)",
+            params![
+                schedule_id,
+                habit_id,
+                starts_on,
+                timezone,
+                name.as_str(),
+                now_utc
+            ],
+        )?;
+
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn materialize_daily_occurrences(
+        &mut self,
+        date: &str,
+        timezone: &str,
+        now_utc: &str,
+    ) -> Result<(), DatabaseError> {
+        self.connection.execute(
+            "INSERT INTO habit_occurrences (
+                 schedule_id, habit_id, scheduled_date, timezone, habit_name, habit_type,
+                 completed, completed_at_utc, created_at_utc, updated_at_utc
+             )
+             SELECT s.id, h.id, ?1, ?2, h.name, h.habit_type, 0, NULL, ?3, ?3
+             FROM habits h
+             JOIN habit_schedules s ON s.habit_id = h.id
+             WHERE h.archived_at_utc IS NULL
+               AND s.schedule_kind = 'daily'
+               AND s.starts_on <= ?1
+               AND (s.ends_on IS NULL OR s.ends_on >= ?1)
+             ON CONFLICT (habit_id, scheduled_date) DO NOTHING",
+            params![date, timezone, now_utc],
+        )?;
+        Ok(())
+    }
+
+    pub fn today_habits(&self, date: &str) -> Result<Vec<TodayHabit>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT o.id, o.habit_id, o.habit_name, o.completed
+             FROM habit_occurrences o
+             JOIN habits h ON h.id = o.habit_id
+             WHERE o.scheduled_date = ?1
+               AND h.archived_at_utc IS NULL
+             ORDER BY h.created_at_utc, h.id",
+        )?;
+        let rows = statement.query_map([date], |row| {
+            Ok(TodayHabit {
+                occurrence_id: row.get(0)?,
+                habit_id: row.get(1)?,
+                name: row.get(2)?,
+                completed: row.get::<_, i64>(3)? != 0,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn toggle_binary_occurrence(
+        &mut self,
+        occurrence_id: i64,
+        expected_date: &str,
+        now_utc: &str,
+    ) -> Result<(), DatabaseError> {
+        let transaction = self.connection.transaction()?;
+        let completed: Option<i64> = transaction
+            .query_row(
+                "SELECT completed
+                 FROM habit_occurrences
+                 WHERE id = ?1 AND scheduled_date = ?2 AND habit_type = 'binary'",
+                params![occurrence_id, expected_date],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let completed = completed.ok_or(DatabaseError::OccurrenceNotFound(occurrence_id))?;
+        let next_completed = i64::from(completed == 0);
+        let completed_at = (next_completed == 1).then_some(now_utc);
+
+        transaction.execute(
+            "UPDATE habit_occurrences
+             SET completed = ?1, completed_at_utc = ?2, updated_at_utc = ?3
+             WHERE id = ?4",
+            params![next_completed, completed_at, now_utc, occurrence_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn connection(&self) -> &Connection {
         &self.connection
@@ -130,6 +250,8 @@ pub enum DatabaseError {
         actual: DataEnvironment,
         path: Option<PathBuf>,
     },
+    #[error("habit occurrence {0} was not found for the active day")]
+    OccurrenceNotFound(i64),
 }
 
 #[cfg(test)]
@@ -142,7 +264,7 @@ mod tests {
             Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
 
         assert_eq!(database.environment_identity().unwrap(), "test");
-        assert_eq!(database.schema_version().unwrap(), 1);
+        assert_eq!(database.schema_version().unwrap(), 2);
         assert_eq!(
             database
                 .connection()
@@ -162,7 +284,7 @@ mod tests {
             Database::open(&path, DataEnvironment::Development).expect("matching reopen");
 
         assert_eq!(reopened.environment_identity().unwrap(), "development");
-        assert_eq!(reopened.schema_version().unwrap(), 1);
+        assert_eq!(reopened.schema_version().unwrap(), 2);
     }
 
     #[test]
@@ -183,5 +305,33 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn daily_occurrences_materialize_once_and_toggle_transactionally() {
+        let mut database =
+            Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
+        let name = HabitName::parse("read").unwrap();
+
+        database
+            .create_daily_binary_habit(&name, "2026-08-23", "Europe/Oslo", "2026-08-23T08:00:00Z")
+            .unwrap();
+        database
+            .materialize_daily_occurrences("2026-08-23", "Europe/Oslo", "2026-08-23T08:00:01Z")
+            .unwrap();
+
+        let habits = database.today_habits("2026-08-23").unwrap();
+        assert_eq!(habits.len(), 1);
+        assert_eq!(habits[0].name, "read");
+        assert!(!habits[0].completed);
+
+        database
+            .toggle_binary_occurrence(
+                habits[0].occurrence_id,
+                "2026-08-23",
+                "2026-08-23T08:05:00Z",
+            )
+            .unwrap();
+        assert!(database.today_habits("2026-08-23").unwrap()[0].completed);
     }
 }

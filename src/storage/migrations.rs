@@ -8,11 +8,18 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    description: "foundation metadata",
-    sql: include_str!("../../migrations/0001_foundation.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        description: "foundation metadata",
+        sql: include_str!("../../migrations/0001_foundation.sql"),
+    },
+    Migration {
+        version: 2,
+        description: "daily binary habits and occurrences",
+        sql: include_str!("../../migrations/0002_binary_habits.sql"),
+    },
+];
 
 pub(super) fn run(connection: &mut Connection) -> Result<(), DatabaseError> {
     connection.execute_batch(

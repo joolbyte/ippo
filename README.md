@@ -12,7 +12,14 @@ The stable Rust toolchain is required.
 cargo run
 ```
 
-Running through Cargo defaults to the isolated `dev` profile. The minimal foundation TUI identifies development mode visibly and exits with `q`, `Esc`, or `Ctrl+C`.
+Running through Cargo defaults to the isolated `dev` profile. The TUI identifies development mode visibly and exits with `q`, `Esc`, or `Ctrl+C`.
+
+The first real habit loop is available in the TUI:
+
+- Press `n`, enter a name, and press `Enter` to create a daily binary habit.
+- Move through today's habits with `j`/`k` or the arrow keys.
+- Press `Space` to toggle the selected habit's completion for today.
+- Press `q` or `Esc` to quit. Habits and dated completion state survive restart.
 
 To intentionally run against your personal profile while developing:
 
@@ -43,4 +50,4 @@ Automated tests use isolated in-memory or temporary databases. They never use pe
 
 ## Repository status
 
-The application currently provides the safe runtime foundation: profile resolution, environment-tagged SQLite storage, explicit migrations, controlled UTC/IANA-timezone boundaries, diagnostics, and a minimal responsive Ratatui shell. Habit tracking functionality comes next.
+The application provides the safe runtime foundation plus its first persistent vertical slice: daily binary-habit creation, today's dated occurrences, completion toggling, day rollover, and responsive empty/active TUI states. Routines, richer habit types, editing, archival, history, contribution aggregation, and gamification remain future work.
