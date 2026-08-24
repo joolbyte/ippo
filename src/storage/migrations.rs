@@ -24,6 +24,11 @@ const MIGRATIONS: &[Migration] = &[
         description: "routines and historical routine membership",
         sql: include_str!("../../migrations/0003_routines_and_history.sql"),
     },
+    Migration {
+        version: 4,
+        description: "non-destructive habit archival",
+        sql: include_str!("../../migrations/0004_habit_archival.sql"),
+    },
 ];
 
 pub(super) fn run(connection: &mut Connection) -> Result<(), DatabaseError> {

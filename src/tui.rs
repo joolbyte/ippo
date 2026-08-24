@@ -111,6 +111,15 @@ enum InputMode {
         routine_cursor: usize,
         error: Option<String>,
     },
+    ConfirmingArchive {
+        habit_id: i64,
+        habit_name: String,
+        editor_name: String,
+        routines: Vec<RoutineChoice>,
+        focus: SettingsFocus,
+        routine_cursor: usize,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -123,6 +132,7 @@ struct RoutineChoice {
 enum SettingsFocus {
     Name,
     Routines,
+    Archive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,9 +249,26 @@ impl<C: Clock, T: TimeZoneSource> TuiState<C, T> {
                 KeyCode::Tab => {
                     *focus = match focus {
                         SettingsFocus::Name => SettingsFocus::Routines,
-                        SettingsFocus::Routines => SettingsFocus::Name,
+                        SettingsFocus::Routines => SettingsFocus::Archive,
+                        SettingsFocus::Archive => SettingsFocus::Name,
                     };
                     *error = None;
+                }
+                KeyCode::Enter if *focus == SettingsFocus::Archive => {
+                    self.mode = InputMode::ConfirmingArchive {
+                        habit_id: *habit_id,
+                        habit_name: self
+                            .application
+                            .habits()
+                            .iter()
+                            .find(|habit| habit.habit_id == *habit_id)
+                            .map_or_else(|| name.clone(), |habit| habit.name.clone()),
+                        editor_name: name.clone(),
+                        routines: routines.clone(),
+                        focus: *focus,
+                        routine_cursor: *routine_cursor,
+                        error: None,
+                    };
                 }
                 KeyCode::Enter => {
                     let habit_id = *habit_id;
@@ -295,6 +322,46 @@ impl<C: Clock, T: TimeZoneSource> TuiState<C, T> {
                 {
                     name.push(character);
                     *error = None;
+                }
+                _ => {}
+            },
+            InputMode::ConfirmingArchive {
+                habit_id,
+                habit_name,
+                editor_name,
+                routines,
+                focus,
+                routine_cursor,
+                error,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.mode = InputMode::EditingHabit {
+                        habit_id: *habit_id,
+                        name: editor_name.clone(),
+                        routines: routines.clone(),
+                        focus: *focus,
+                        routine_cursor: *routine_cursor,
+                        error: None,
+                    };
+                }
+                KeyCode::Enter => {
+                    let habit_id = *habit_id;
+                    let habit_name = habit_name.clone();
+                    match self.application.archive_habit(habit_id) {
+                        Ok(()) => {
+                            self.selected = self
+                                .selected
+                                .min(self.habit_entries().len().saturating_sub(1));
+                            self.mode = InputMode::Normal;
+                            self.notice = Some(Notice {
+                                message: format!("archived ‘{habit_name}’"),
+                                is_error: false,
+                            });
+                        }
+                        Err(application_error) => {
+                            *error = Some(application_error.to_string());
+                        }
+                    }
                 }
                 _ => {}
             },
@@ -610,6 +677,7 @@ fn render<C: Clock, T: TimeZoneSource>(
             render_name_dialog(frame, area, state, NameDialogKind::Routine)
         }
         InputMode::EditingHabit { .. } => render_settings_dialog(frame, area, state),
+        InputMode::ConfirmingArchive { .. } => render_archive_confirmation(frame, area, state),
         InputMode::Normal => {}
     }
 }
@@ -899,9 +967,7 @@ fn render_today<C: Clock, T: TimeZoneSource>(
         all_lines.push(Line::from(vec![
             Span::styled(
                 format!("┌─ {}", group.name.to_uppercase()),
-                Style::default()
-                    .fg(palette::INDIGO)
-                    .add_modifier(Modifier::BOLD),
+                routine_heading_style(false),
             ),
             Span::styled(
                 format!("  [{group_completed} / {}]", group.habit_indices.len()),
@@ -961,9 +1027,7 @@ fn render_projected_habits<C: Clock, T: TimeZoneSource>(
         lines.push(Line::from(vec![
             Span::styled(
                 format!("┌─ {}", group.name.to_uppercase()),
-                Style::default()
-                    .fg(palette::INDIGO)
-                    .add_modifier(Modifier::BOLD),
+                routine_heading_style(true),
             ),
             Span::styled(
                 format!("  [{} scheduled]", group.habit_indices.len()),
@@ -1121,10 +1185,27 @@ fn render_footer<C: Clock, T: TimeZoneSource>(
 ) {
     if !matches!(state.mode, InputMode::Normal) {
         let editing = matches!(state.mode, InputMode::EditingHabit { .. });
+        let confirming_archive = matches!(state.mode, InputMode::ConfirmingArchive { .. });
+        let archive_selected = matches!(
+            state.mode,
+            InputMode::EditingHabit {
+                focus: SettingsFocus::Archive,
+                ..
+            }
+        );
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 key("enter"),
-                Span::styled(if editing { " save   " } else { " create   " }, muted()),
+                Span::styled(
+                    if confirming_archive || archive_selected {
+                        " archive   "
+                    } else if editing {
+                        " save   "
+                    } else {
+                        " create   "
+                    },
+                    muted(),
+                ),
                 if editing { key("tab") } else { Span::raw("") },
                 Span::styled(if editing { " field   " } else { "" }, muted()),
                 key("esc"),
@@ -1333,7 +1414,7 @@ fn render_settings_dialog<C: Clock, T: TimeZoneSource>(
     else {
         return;
     };
-    let height = (10 + routines.len() as u16).min(area.height.saturating_sub(2));
+    let height = (13 + routines.len() as u16).min(area.height.saturating_sub(2));
     let popup = centered_rect(area, 72, height);
     frame.render_widget(Clear, popup);
 
@@ -1411,9 +1492,81 @@ fn render_settings_dialog<C: Clock, T: TimeZoneSource>(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
+        if *focus == SettingsFocus::Archive {
+            "› ARCHIVE HABIT"
+        } else {
+            "  ARCHIVE HABIT"
+        },
+        if *focus == SettingsFocus::Archive {
+            Style::default()
+                .fg(palette::VERMILION)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            muted()
+        },
+    )));
+    lines.push(Line::from(Span::styled(
+        "  Removes today and future · preserves past history",
+        muted(),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
         error
             .as_deref()
-            .unwrap_or("Tab changes field · Enter saves"),
+            .unwrap_or("Tab changes field · Enter selects"),
+        Style::default().fg(if error.is_some() {
+            palette::VERMILION
+        } else {
+            palette::STONE
+        }),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_archive_confirmation<C: Clock, T: TimeZoneSource>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &TuiState<C, T>,
+) {
+    let InputMode::ConfirmingArchive {
+        habit_name, error, ..
+    } = &state.mode
+    else {
+        return;
+    };
+    let popup = centered_rect(area, 64, 10);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(palette::VERMILION))
+        .style(Style::default().bg(palette::SUMI))
+        .title(Span::styled(" ARCHIVE HABIT ", accent()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Archive ", Style::default().fg(palette::WASHI)),
+            Span::styled(
+                format!("‘{habit_name}’"),
+                Style::default()
+                    .fg(palette::WASHI)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("?", Style::default().fg(palette::WASHI)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "It will disappear from Today and future dates.",
+            muted(),
+        )),
+        Line::from(Span::styled("Past history will remain unchanged.", muted())),
+        Line::from(""),
+    ];
+    lines.push(Line::from(Span::styled(
+        error.as_deref().unwrap_or("Enter archives · Esc cancels"),
         Style::default().fg(if error.is_some() {
             palette::VERMILION
         } else {
@@ -1512,11 +1665,21 @@ fn habit_line(habit: &TodayHabit, selected: bool) -> Line<'static> {
 
 fn projected_habit_line(habit: &ProjectedHabit) -> Line<'static> {
     Line::from(vec![
-        Span::styled("│  ", Style::default().fg(palette::VERMILION_DARK)),
+        Span::styled("│  ", Style::default().fg(palette::STONE)),
         Span::styled("○", Style::default().fg(palette::STONE)),
         Span::raw(" "),
-        Span::styled(habit.name.clone(), Style::default().fg(palette::WASHI)),
+        Span::styled(habit.name.clone(), Style::default().fg(palette::STONE)),
     ])
+}
+
+fn routine_heading_style(read_only_preview: bool) -> Style {
+    Style::default()
+        .fg(if read_only_preview {
+            palette::STONE
+        } else {
+            palette::INDIGO
+        })
+        .add_modifier(Modifier::BOLD)
 }
 
 struct HabitGroup {
@@ -1788,7 +1951,7 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
             database_overridden: false,
-            schema_version: 3,
+            schema_version: 4,
         }
     }
 
@@ -1925,6 +2088,47 @@ mod tests {
     }
 
     #[test]
+    fn habit_settings_require_explicit_archive_confirmation() {
+        let mut state = state();
+        state.application.create_daily_binary("read").unwrap();
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let settings = rendered_text(120, 36, &state);
+        assert!(settings.contains("ARCHIVE HABIT"));
+        assert!(settings.contains("preserves past history"));
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(state.mode, InputMode::ConfirmingArchive { .. }));
+        let confirmation = rendered_text(120, 36, &state);
+        assert!(confirmation.contains("Archive ‘read’?"));
+        assert!(confirmation.contains("Past history will remain unchanged"));
+        assert_eq!(state.application.habits().len(), 1);
+
+        state.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(
+            state.mode,
+            InputMode::EditingHabit {
+                focus: SettingsFocus::Archive,
+                ..
+            }
+        ));
+        assert_eq!(state.application.habits().len(), 1);
+
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(state.mode, InputMode::Normal));
+        assert!(state.application.habits().is_empty());
+        assert_eq!(state.application.completion_percentage(), 0);
+        assert_eq!(
+            state.notice.as_ref().map(|notice| notice.message.as_str()),
+            Some("archived ‘read’")
+        );
+    }
+
+    #[test]
     fn a_habit_can_appear_in_multiple_routine_groups_without_double_counting() {
         let mut state = state();
         state.application.create_daily_binary("stretch").unwrap();
@@ -1994,6 +2198,12 @@ mod tests {
         assert!(output.contains("1 habit scheduled"));
         assert!(output.contains("viewing 2026-08-24 · upcoming preview"));
         assert!(state.application.habits().is_empty());
+    }
+
+    #[test]
+    fn routine_heading_colors_distinguish_today_from_future_previews() {
+        assert_eq!(routine_heading_style(false).fg, Some(palette::INDIGO));
+        assert_eq!(routine_heading_style(true).fg, Some(palette::STONE));
     }
 
     #[test]

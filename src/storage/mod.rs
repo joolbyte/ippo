@@ -260,6 +260,38 @@ impl Database {
         Ok(())
     }
 
+    pub fn archive_habit(
+        &mut self,
+        habit_id: i64,
+        active_date: &str,
+        now_utc: &str,
+    ) -> Result<(), DatabaseError> {
+        let transaction = self.connection.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE habits
+             SET archived_at_utc = ?1
+             WHERE id = ?2 AND archived_at_utc IS NULL",
+            params![now_utc, habit_id],
+        )?;
+        if updated == 0 {
+            return Err(DatabaseError::HabitNotFound(habit_id));
+        }
+
+        transaction.execute(
+            "UPDATE habit_occurrences
+             SET excluded_at_utc = ?1,
+                 exclusion_reason = 'habit_archived',
+                 updated_at_utc = ?1
+             WHERE habit_id = ?2
+               AND scheduled_date = ?3
+               AND excluded_at_utc IS NULL",
+            params![now_utc, habit_id, active_date],
+        )?;
+
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn materialize_daily_occurrences(
         &mut self,
         date: &str,
@@ -363,7 +395,7 @@ impl Database {
              FROM habit_occurrences o
              JOIN habits h ON h.id = o.habit_id
              WHERE o.scheduled_date = ?1
-               AND h.archived_at_utc IS NULL
+               AND o.excluded_at_utc IS NULL
              ORDER BY o.completed ASC, h.created_at_utc, h.id",
         )?;
         let rows = statement.query_map([date], |row| {
@@ -448,6 +480,7 @@ impl Database {
             "SELECT scheduled_date, COUNT(*), SUM(completed)
              FROM habit_occurrences
              WHERE scheduled_date BETWEEN ?1 AND ?2
+               AND excluded_at_utc IS NULL
              GROUP BY scheduled_date
              ORDER BY scheduled_date",
         )?;
@@ -480,7 +513,10 @@ impl Database {
             .query_row(
                 "SELECT completed
                  FROM habit_occurrences
-                 WHERE id = ?1 AND scheduled_date = ?2 AND habit_type = 'binary'",
+                 WHERE id = ?1
+                   AND scheduled_date = ?2
+                   AND habit_type = 'binary'
+                   AND excluded_at_utc IS NULL",
                 params![occurrence_id, expected_date],
                 |row| row.get(0),
             )
@@ -548,7 +584,7 @@ mod tests {
             Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
 
         assert_eq!(database.environment_identity().unwrap(), "test");
-        assert_eq!(database.schema_version().unwrap(), 3);
+        assert_eq!(database.schema_version().unwrap(), 4);
         assert_eq!(
             database
                 .connection()
@@ -568,7 +604,7 @@ mod tests {
             Database::open(&path, DataEnvironment::Development).expect("matching reopen");
 
         assert_eq!(reopened.environment_identity().unwrap(), "development");
-        assert_eq!(reopened.schema_version().unwrap(), 3);
+        assert_eq!(reopened.schema_version().unwrap(), 4);
     }
 
     #[test]
@@ -615,7 +651,7 @@ mod tests {
 
         let migrated = Database::open(&path, DataEnvironment::Development).unwrap();
 
-        assert_eq!(migrated.schema_version().unwrap(), 3);
+        assert_eq!(migrated.schema_version().unwrap(), 4);
         assert_eq!(
             migrated
                 .connection()
@@ -758,6 +794,69 @@ mod tests {
         let second_day = database.today_habits("2026-08-24").unwrap();
         assert_eq!(second_day[0].name, "write");
         assert_eq!(second_day[0].routines[0].name, "evening");
+    }
+
+    #[test]
+    fn archiving_excludes_today_and_future_without_changing_past_history() {
+        let mut database =
+            Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
+        database
+            .create_daily_binary_habit(
+                &HabitName::parse("read").unwrap(),
+                "2026-08-23",
+                "Europe/Oslo",
+                "2026-08-23T08:00:00Z",
+            )
+            .unwrap();
+        let past_occurrence = database.today_habits("2026-08-23").unwrap()[0].occurrence_id;
+        database
+            .toggle_binary_occurrence(past_occurrence, "2026-08-23", "2026-08-23T08:05:00Z")
+            .unwrap();
+        database
+            .materialize_daily_occurrences("2026-08-24", "Europe/Oslo", "2026-08-24T08:00:00Z")
+            .unwrap();
+        let today = database.today_habits("2026-08-24").unwrap()[0].clone();
+
+        database
+            .archive_habit(today.habit_id, "2026-08-24", "2026-08-24T09:00:00Z")
+            .unwrap();
+
+        let past = database.today_habits("2026-08-23").unwrap();
+        assert_eq!(past.len(), 1);
+        assert_eq!(past[0].name, "read");
+        assert!(past[0].completed);
+        assert!(database.today_habits("2026-08-24").unwrap().is_empty());
+        assert!(database.projected_habits("2026-08-25").unwrap().is_empty());
+
+        database
+            .materialize_daily_occurrences("2026-08-25", "Europe/Oslo", "2026-08-25T08:00:00Z")
+            .unwrap();
+        assert!(database.today_habits("2026-08-25").unwrap().is_empty());
+
+        let progress = database.day_progress("2026-08-23", "2026-08-25").unwrap();
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0].date, Date::new(2026, 8, 23).unwrap());
+        assert_eq!(progress[0].percentage(), 100);
+
+        let retained: (String, String) = database
+            .connection()
+            .query_row(
+                "SELECT excluded_at_utc, exclusion_reason
+                 FROM habit_occurrences WHERE id = ?1",
+                [today.occurrence_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retained.0, "2026-08-24T09:00:00Z");
+        assert_eq!(retained.1, "habit_archived");
+        assert!(matches!(
+            database.toggle_binary_occurrence(
+                today.occurrence_id,
+                "2026-08-24",
+                "2026-08-24T09:01:00Z"
+            ),
+            Err(DatabaseError::OccurrenceNotFound(_))
+        ));
     }
 
     #[test]

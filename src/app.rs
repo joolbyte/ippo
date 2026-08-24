@@ -126,6 +126,14 @@ impl<C: Clock, T: TimeZoneSource> HabitApplication<C, T> {
         self.reload(now, false)
     }
 
+    pub fn archive_habit(&mut self, habit_id: i64) -> Result<(), ApplicationError> {
+        self.require_today()?;
+        let now = self.clock.now();
+        self.database
+            .archive_habit(habit_id, &self.today.to_string(), &now.to_string())?;
+        self.reload(now, false)
+    }
+
     pub fn toggle(&mut self, occurrence_id: i64) -> Result<(), ApplicationError> {
         self.require_today()?;
         let now = self.clock.now();
@@ -337,5 +345,28 @@ mod tests {
             application.create_routine("must also fail"),
             Err(ApplicationError::ReadOnlyFuture(_))
         ));
+    }
+
+    #[test]
+    fn archive_habit_immediately_refreshes_today_and_contributions() {
+        let database = Database::open_in_memory(DataEnvironment::Test).unwrap();
+        let timestamp: Timestamp = "2026-08-24T12:00:00Z".parse().unwrap();
+        let mut application = HabitApplication::new(
+            database,
+            FixedClock::new(timestamp),
+            FixedTimeZone::new(TimeZone::UTC),
+        )
+        .unwrap();
+        application.create_daily_binary("read").unwrap();
+        let habit_id = application.habits()[0].habit_id;
+        assert_eq!(application.contributions().len(), 1);
+
+        application.archive_habit(habit_id).unwrap();
+
+        assert!(application.habits().is_empty());
+        assert_eq!(application.completion_percentage(), 0);
+        assert!(application.contributions().is_empty());
+        application.select_date(date(2026, 8, 25)).unwrap();
+        assert!(application.projected_habits().is_empty());
     }
 }
