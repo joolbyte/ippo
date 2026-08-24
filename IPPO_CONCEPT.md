@@ -95,11 +95,15 @@ A routine is a named group of habits, such as `morning`, `deep work`, `personal`
 
 A habit may need to appear in more than one organizational context, so implementations should avoid assuming that a habit can only ever belong to one routine unless the product explicitly decides otherwise.
 
+The initial routine experience supports this directly: routines are unlimited, habits may belong to several routines, and the Today view presents a habit under each routine it belongs to. Habits without a routine remain visible under an `ungrouped` section.
+
 ### Scheduled occurrences
 
 The application should reason about a habit as a definition and each scheduled day as a dated occurrence. This distinction is important for preserving history when a habit is edited, paused, archived, rescheduled, or otherwise changed later.
 
 Historical records should remain truthful. Editing today's habit definition must not silently rewrite what the user actually did in the past.
+
+The first habit-settings surface edits a binary habit's current name and routine memberships. Those changes update today's occurrence so the active dashboard responds immediately, while earlier occurrence names and routine memberships remain unchanged. Schedule, type, pause, and archive controls require their own explicit lifecycle rules before joining this surface.
 
 ### Completions and progress
 
@@ -181,6 +185,10 @@ Missing, unscheduled, future, and zero-completion days must be represented delib
 ## Calendar and history
 
 Users should be able to return to a past date and understand what was scheduled, what was completed, the progress recorded, and any writing saved that day.
+
+Calendar browsing initially moves by day or month and loads the selected date into the dashboard. Past and future dates are read-only; the user can return to today with one key. This keeps historical inspection safe until explicit historical-correction semantics are designed.
+
+Today, Calendar, and Contributions are keyboard-focusable views as well as dashboard areas. Compact terminals must keep all three reachable instead of silently hiding historical features because there is not enough room to render every panel at once.
 
 History should support reflection rather than shame. Missed days are data, not failures that require punitive messaging.
 

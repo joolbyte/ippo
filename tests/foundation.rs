@@ -12,6 +12,6 @@ fn diagnostics_use_an_injected_disposable_database() {
         .expect("diagnostics");
 
     assert_eq!(diagnostics.environment, "test");
-    assert_eq!(diagnostics.schema_version, 2);
+    assert_eq!(diagnostics.schema_version, 3);
     assert_eq!(diagnostics.database_path, path.to_string_lossy());
 }

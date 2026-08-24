@@ -6,12 +6,13 @@ use std::{
     str::FromStr,
 };
 
+use jiff::civil::Date;
 use rusqlite::{Connection, OptionalExtension, params};
 use thiserror::Error;
 
 use crate::{
     config::DataEnvironment,
-    habit::{HabitName, TodayHabit},
+    habit::{DayProgress, HabitName, Routine, RoutineName, TodayHabit},
 };
 
 const ENVIRONMENT_KEY: &str = "data_environment";
@@ -148,27 +149,211 @@ impl Database {
         Ok(())
     }
 
+    pub fn create_routine(
+        &mut self,
+        name: &RoutineName,
+        now_utc: &str,
+    ) -> Result<(), DatabaseError> {
+        let exists = self.connection.query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM routines
+                 WHERE name = ?1 COLLATE NOCASE AND archived_at_utc IS NULL
+             )",
+            [name.as_str()],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            return Err(DatabaseError::RoutineAlreadyExists(
+                name.as_str().to_owned(),
+            ));
+        }
+
+        self.connection.execute(
+            "INSERT INTO routines (name, created_at_utc) VALUES (?1, ?2)",
+            (name.as_str(), now_utc),
+        )?;
+        Ok(())
+    }
+
+    pub fn routines(&self) -> Result<Vec<Routine>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name
+             FROM routines
+             WHERE archived_at_utc IS NULL
+             ORDER BY created_at_utc, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(Routine {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?;
+
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn update_habit_settings(
+        &mut self,
+        habit_id: i64,
+        name: &HabitName,
+        routine_ids: &[i64],
+        active_date: &str,
+        now_utc: &str,
+    ) -> Result<(), DatabaseError> {
+        let transaction = self.connection.transaction()?;
+        let updated = transaction.execute(
+            "UPDATE habits SET name = ?1 WHERE id = ?2 AND archived_at_utc IS NULL",
+            params![name.as_str(), habit_id],
+        )?;
+        if updated == 0 {
+            return Err(DatabaseError::HabitNotFound(habit_id));
+        }
+
+        transaction.execute(
+            "UPDATE habit_occurrences
+             SET habit_name = ?1, updated_at_utc = ?2
+             WHERE habit_id = ?3 AND scheduled_date = ?4",
+            params![name.as_str(), now_utc, habit_id, active_date],
+        )?;
+        transaction.execute("DELETE FROM habit_routines WHERE habit_id = ?1", [habit_id])?;
+
+        for (position, routine_id) in routine_ids.iter().enumerate() {
+            let inserted = transaction.execute(
+                "INSERT INTO habit_routines (habit_id, routine_id, position, created_at_utc)
+                 SELECT ?1, id, ?2, ?3
+                 FROM routines
+                 WHERE id = ?4 AND archived_at_utc IS NULL",
+                params![habit_id, position as i64, now_utc, routine_id],
+            )?;
+            if inserted == 0 {
+                return Err(DatabaseError::RoutineNotFound(*routine_id));
+            }
+        }
+
+        let occurrence_id: Option<i64> = transaction
+            .query_row(
+                "SELECT id FROM habit_occurrences
+                 WHERE habit_id = ?1 AND scheduled_date = ?2",
+                params![habit_id, active_date],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(occurrence_id) = occurrence_id {
+            transaction.execute(
+                "DELETE FROM habit_occurrence_routines WHERE occurrence_id = ?1",
+                [occurrence_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO habit_occurrence_routines (
+                     occurrence_id, routine_id, routine_name, position
+                 )
+                 SELECT ?1, r.id, r.name, hr.position
+                 FROM habit_routines hr
+                 JOIN routines r ON r.id = hr.routine_id
+                 WHERE hr.habit_id = ?2
+                 ORDER BY hr.position, r.id",
+                params![occurrence_id, habit_id],
+            )?;
+        }
+
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn materialize_daily_occurrences(
         &mut self,
         date: &str,
         timezone: &str,
         now_utc: &str,
     ) -> Result<(), DatabaseError> {
-        self.connection.execute(
-            "INSERT INTO habit_occurrences (
-                 schedule_id, habit_id, scheduled_date, timezone, habit_name, habit_type,
-                 completed, completed_at_utc, created_at_utc, updated_at_utc
-             )
-             SELECT s.id, h.id, ?1, ?2, h.name, h.habit_type, 0, NULL, ?3, ?3
-             FROM habits h
-             JOIN habit_schedules s ON s.habit_id = h.id
-             WHERE h.archived_at_utc IS NULL
-               AND s.schedule_kind = 'daily'
-               AND s.starts_on <= ?1
-               AND (s.ends_on IS NULL OR s.ends_on >= ?1)
-             ON CONFLICT (habit_id, scheduled_date) DO NOTHING",
-            params![date, timezone, now_utc],
+        let transaction = self.connection.transaction()?;
+        let due = {
+            let mut statement = transaction.prepare(
+                "SELECT s.id, h.id, h.name, h.habit_type
+                 FROM habits h
+                 JOIN habit_schedules s ON s.habit_id = h.id
+                 WHERE h.archived_at_utc IS NULL
+                   AND s.schedule_kind = 'daily'
+                   AND s.starts_on <= ?1
+                   AND (s.ends_on IS NULL OR s.ends_on >= ?1)
+                 ORDER BY h.created_at_utc, h.id",
+            )?;
+            let rows = statement.query_map([date], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        for (schedule_id, habit_id, habit_name, habit_type) in due {
+            let inserted = transaction.execute(
+                "INSERT INTO habit_occurrences (
+                     schedule_id, habit_id, scheduled_date, timezone, habit_name, habit_type,
+                     completed, completed_at_utc, created_at_utc, updated_at_utc
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, ?7, ?7)
+                 ON CONFLICT (habit_id, scheduled_date) DO NOTHING",
+                params![
+                    schedule_id,
+                    habit_id,
+                    date,
+                    timezone,
+                    habit_name,
+                    habit_type,
+                    now_utc
+                ],
+            )?;
+
+            if inserted == 1 {
+                let occurrence_id = transaction.last_insert_rowid();
+                transaction.execute(
+                    "INSERT INTO habit_occurrence_routines (
+                         occurrence_id, routine_id, routine_name, position
+                     )
+                     SELECT ?1, r.id, r.name, hr.position
+                     FROM habit_routines hr
+                     JOIN routines r ON r.id = hr.routine_id
+                     WHERE hr.habit_id = ?2
+                     ORDER BY hr.position, r.id",
+                    params![occurrence_id, habit_id],
+                )?;
+            }
+        }
+
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn reconcile_daily_occurrences_through(
+        &mut self,
+        through_date: Date,
+        timezone: &str,
+        now_utc: &str,
+    ) -> Result<(), DatabaseError> {
+        let first_date: Option<String> = self.connection.query_row(
+            "SELECT MIN(starts_on) FROM habit_schedules
+             WHERE schedule_kind = 'daily' AND starts_on <= ?1",
+            [through_date.to_string()],
+            |row| row.get(0),
         )?;
+        let Some(first_date) = first_date else {
+            return Ok(());
+        };
+        let mut date = Date::from_str(&first_date)
+            .map_err(|_| DatabaseError::InvalidStoredDate(first_date.clone()))?;
+
+        while date <= through_date {
+            self.materialize_daily_occurrences(&date.to_string(), timezone, now_utc)?;
+            if date == through_date {
+                break;
+            }
+            date = date
+                .tomorrow()
+                .map_err(|_| DatabaseError::InvalidStoredDate(date.to_string()))?;
+        }
         Ok(())
     }
 
@@ -187,10 +372,59 @@ impl Database {
                 habit_id: row.get(1)?,
                 name: row.get(2)?,
                 completed: row.get::<_, i64>(3)? != 0,
+                routines: Vec::new(),
             })
         })?;
+        let mut habits = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
 
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let mut routine_statement = self.connection.prepare(
+            "SELECT routine_id, routine_name
+             FROM habit_occurrence_routines
+             WHERE occurrence_id = ?1
+             ORDER BY position, routine_id",
+        )?;
+        for habit in &mut habits {
+            let routines = routine_statement.query_map([habit.occurrence_id], |row| {
+                Ok(Routine {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            })?;
+            habit.routines = routines.collect::<Result<Vec<_>, _>>()?;
+        }
+
+        Ok(habits)
+    }
+
+    pub fn day_progress(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<Vec<DayProgress>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT scheduled_date, COUNT(*), SUM(completed)
+             FROM habit_occurrences
+             WHERE scheduled_date BETWEEN ?1 AND ?2
+             GROUP BY scheduled_date
+             ORDER BY scheduled_date",
+        )?;
+        let rows = statement.query_map(params![start_date, end_date], |row| {
+            let date: String = row.get(0)?;
+            Ok((date, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))
+        })?;
+
+        rows.map(|row| {
+            let (date, scheduled, completed) = row?;
+            let parsed = Date::from_str(&date)
+                .map_err(|_| DatabaseError::InvalidStoredDate(date.clone()))?;
+            Ok(DayProgress {
+                date: parsed,
+                scheduled: scheduled as usize,
+                completed: completed as usize,
+            })
+        })
+        .collect()
     }
 
     pub fn toggle_binary_occurrence(
@@ -252,6 +486,14 @@ pub enum DatabaseError {
     },
     #[error("habit occurrence {0} was not found for the active day")]
     OccurrenceNotFound(i64),
+    #[error("habit {0} was not found")]
+    HabitNotFound(i64),
+    #[error("routine {0} was not found")]
+    RoutineNotFound(i64),
+    #[error("a routine named '{0}' already exists")]
+    RoutineAlreadyExists(String),
+    #[error("database contains an invalid civil date '{0}'")]
+    InvalidStoredDate(String),
 }
 
 #[cfg(test)]
@@ -264,7 +506,7 @@ mod tests {
             Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
 
         assert_eq!(database.environment_identity().unwrap(), "test");
-        assert_eq!(database.schema_version().unwrap(), 2);
+        assert_eq!(database.schema_version().unwrap(), 3);
         assert_eq!(
             database
                 .connection()
@@ -284,7 +526,62 @@ mod tests {
             Database::open(&path, DataEnvironment::Development).expect("matching reopen");
 
         assert_eq!(reopened.environment_identity().unwrap(), "development");
-        assert_eq!(reopened.schema_version().unwrap(), 2);
+        assert_eq!(reopened.schema_version().unwrap(), 3);
+    }
+
+    #[test]
+    fn version_two_database_migrates_without_losing_habits() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("ippo.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                     version INTEGER PRIMARY KEY NOT NULL,
+                     description TEXT NOT NULL,
+                     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 ) STRICT;",
+            )
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../../migrations/0001_foundation.sql"))
+            .unwrap();
+        connection
+            .execute_batch(include_str!("../../migrations/0002_binary_habits.sql"))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (version, description)
+                 VALUES (1, 'foundation metadata'), (2, 'daily binary habits and occurrences')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO app_metadata (key, value) VALUES (?1, ?2)",
+                (ENVIRONMENT_KEY, "development"),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO habits (name, habit_type, created_at_utc)
+                 VALUES ('read', 'binary', '2026-08-23T08:00:00Z')",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = Database::open(&path, DataEnvironment::Development).unwrap();
+
+        assert_eq!(migrated.schema_version().unwrap(), 3);
+        assert_eq!(
+            migrated
+                .connection()
+                .query_row("SELECT name FROM habits", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "read"
+        );
+        assert!(migrated.routines().unwrap().is_empty());
     }
 
     #[test]
@@ -362,5 +659,89 @@ mod tests {
 
         assert_eq!(names, ["first", "third", "second"]);
         assert_eq!(completions, [false, false, true]);
+    }
+
+    #[test]
+    fn habit_settings_preserve_past_names_and_routine_membership() {
+        let mut database =
+            Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
+        database
+            .create_daily_binary_habit(
+                &HabitName::parse("read").unwrap(),
+                "2026-08-23",
+                "Europe/Oslo",
+                "2026-08-23T08:00:00Z",
+            )
+            .unwrap();
+        database
+            .create_routine(
+                &RoutineName::parse("morning").unwrap(),
+                "2026-08-23T08:01:00Z",
+            )
+            .unwrap();
+        let habit_id = database.today_habits("2026-08-23").unwrap()[0].habit_id;
+        let morning_id = database.routines().unwrap()[0].id;
+        database
+            .update_habit_settings(
+                habit_id,
+                &HabitName::parse("read").unwrap(),
+                &[morning_id],
+                "2026-08-23",
+                "2026-08-23T08:02:00Z",
+            )
+            .unwrap();
+        database
+            .materialize_daily_occurrences("2026-08-24", "Europe/Oslo", "2026-08-24T08:00:00Z")
+            .unwrap();
+        database
+            .create_routine(
+                &RoutineName::parse("evening").unwrap(),
+                "2026-08-24T08:01:00Z",
+            )
+            .unwrap();
+        let evening_id = database.routines().unwrap()[1].id;
+        database
+            .update_habit_settings(
+                habit_id,
+                &HabitName::parse("write").unwrap(),
+                &[evening_id],
+                "2026-08-24",
+                "2026-08-24T08:02:00Z",
+            )
+            .unwrap();
+
+        let first_day = database.today_habits("2026-08-23").unwrap();
+        assert_eq!(first_day[0].name, "read");
+        assert_eq!(first_day[0].routines[0].name, "morning");
+        let second_day = database.today_habits("2026-08-24").unwrap();
+        assert_eq!(second_day[0].name, "write");
+        assert_eq!(second_day[0].routines[0].name, "evening");
+    }
+
+    #[test]
+    fn reconciliation_backfills_missed_daily_occurrences_for_contributions() {
+        let mut database =
+            Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
+        database
+            .create_daily_binary_habit(
+                &HabitName::parse("read").unwrap(),
+                "2026-08-20",
+                "Europe/Oslo",
+                "2026-08-20T08:00:00Z",
+            )
+            .unwrap();
+
+        database
+            .reconcile_daily_occurrences_through(
+                Date::new(2026, 8, 23).unwrap(),
+                "Europe/Oslo",
+                "2026-08-23T08:00:00Z",
+            )
+            .unwrap();
+
+        let progress = database.day_progress("2026-08-20", "2026-08-23").unwrap();
+        assert_eq!(progress.len(), 4);
+        assert!(progress.iter().all(|day| day.scheduled == 1));
+        assert!(progress.iter().all(|day| day.percentage() == 0));
     }
 }

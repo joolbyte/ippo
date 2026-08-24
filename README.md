@@ -14,11 +14,16 @@ cargo run
 
 Running through Cargo defaults to the isolated `dev` profile. The TUI identifies development mode visibly and exits with `q`, `Esc`, or `Ctrl+C`.
 
-The first real habit loop is available in the TUI:
+The current habit workflow is available in the TUI:
 
 - Press `n`, enter a name, and press `Enter` to create a daily binary habit.
+- Press `r` to create a routine.
 - Move through today's habits with `j`/`k` or the arrow keys.
+- Press `e` on a habit to rename it or change its routine memberships. Use `Tab` to change fields and `Space` to toggle routines.
 - Press `Space` to toggle the selected habit's completion for today. Completed habits move below all unchecked habits.
+- Use `h`/`l` or the left/right arrows to browse dates, `[`/`]` to move by month, and `t` to return to today. Historical dates are read-only.
+- Press `Tab` to cycle between focused Today, Calendar, and Contributions views; this keeps history available in compact terminals.
+- The calendar and contribution graph are computed from persisted dated occurrences; contribution intensity reflects each day's completion percentage.
 - Press `q` or `Esc` to quit. Habits and dated completion state survive restart.
 
 To intentionally run against your personal profile while developing:
@@ -50,4 +55,4 @@ Automated tests use isolated in-memory or temporary databases. They never use pe
 
 ## Repository status
 
-The application provides the safe runtime foundation plus its first persistent vertical slice: daily binary-habit creation, today's dated occurrences, completion toggling, day rollover, and responsive empty/active TUI states. Routines, richer habit types, editing, archival, history, contribution aggregation, and gamification remain future work.
+The application provides a persistent binary-habit workflow with unlimited routines, multi-routine membership, safe name and routine editing, read-only calendar history, contribution aggregation, completion toggling, day rollover, and responsive TUI states. Richer habit types, schedule editing, archival, writing, XP, levels, and streaks remain future work.
