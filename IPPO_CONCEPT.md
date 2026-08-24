@@ -182,7 +182,9 @@ The contribution graph is a central product feature. It resembles GitHub's calen
 
 Each day's intensity should reflect that day's aggregate completion percentage. For example, a day at 25% should be visibly dimmer than a day at 75%, and a fully completed day should use the strongest intensity.
 
-Missing, unscheduled, future, and zero-completion days must be represented deliberately rather than accidentally conflated. The exact visual scale can evolve, but percentage-based intensity is a core requirement.
+The graph uses a complete seven-row calendar grid with labels for every weekday and square cells separated by evenly sized horizontal and vertical gaps. Every date position remains visible: 0%, missing, unscheduled, and future dates use a subdued neutral blank cell rather than disappearing. Activity uses four discrete moss-green intensity levels: 1–24% is faint, 25–49% is half intensity, 50–74% is three-quarter intensity, and 75–100% is the brightest.
+
+Missing, unscheduled, future, and zero-completion days must be represented deliberately rather than accidentally conflated. Percentage-based intensity is a core requirement.
 
 ## Calendar and history
 

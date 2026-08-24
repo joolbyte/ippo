@@ -34,6 +34,7 @@ use crate::{
 
 const WIDE_TERMINAL_MIN_COLUMNS: u16 = 96;
 const MEDIUM_TERMINAL_MIN_COLUMNS: u16 = 64;
+const CONTRIBUTION_CELL: &str = "▄";
 
 mod palette {
     use ratatui::style::Color;
@@ -44,6 +45,9 @@ mod palette {
     pub const STONE: Color = Color::Rgb(139, 133, 120);
     pub const VERMILION: Color = Color::Rgb(196, 67, 54);
     pub const VERMILION_DARK: Color = Color::Rgb(112, 52, 45);
+    pub const MOSS_FAINT: Color = Color::Rgb(43, 54, 40);
+    pub const MOSS_HALF: Color = Color::Rgb(66, 84, 61);
+    pub const MOSS_THREE_QUARTER: Color = Color::Rgb(90, 113, 83);
     pub const MOSS: Color = Color::Rgb(114, 143, 104);
     pub const INDIGO: Color = Color::Rgb(76, 101, 132);
     pub const GOLD: Color = Color::Rgb(201, 163, 83);
@@ -766,7 +770,7 @@ fn render_wide_dashboard<C: Clock, T: TimeZoneSource>(
     if area.height < 26 {
         render_calendar(frame, columns[1], state);
     } else {
-        let secondary = Layout::vertical([Constraint::Length(17), Constraint::Min(7)])
+        let secondary = Layout::vertical([Constraint::Min(15), Constraint::Length(10)])
             .spacing(1)
             .split(columns[1]);
         render_calendar(frame, secondary[0], state);
@@ -791,7 +795,7 @@ fn render_medium_dashboard<C: Clock, T: TimeZoneSource>(
     let rows = Layout::vertical([
         Constraint::Length(9),
         Constraint::Min(12),
-        Constraint::Length(8),
+        Constraint::Length(10),
     ])
     .spacing(1)
     .split(area);
@@ -1119,8 +1123,8 @@ fn render_contributions<C: Clock, T: TimeZoneSource>(
         .iter()
         .map(|day| (day.date, day))
         .collect();
-    if inner.height < 8 {
-        let days = inner.width.saturating_sub(2).min(42) as usize;
+    if inner.height < 7 {
+        let days = (inner.width.saturating_sub(2) / 2).min(42) as usize;
         let start = state
             .application
             .today()
@@ -1133,18 +1137,18 @@ fn render_contributions<C: Clock, T: TimeZoneSource>(
                 state.application.today(),
                 progress.get(&date).copied(),
             ));
+            cells.push(Span::raw(" "));
         }
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled("recent consistency", muted())),
                 Line::from(cells),
-                Line::from(Span::styled("· none  ░ 0%  ▒▓█ progress", muted())),
             ]),
             inner,
         );
         return;
     }
-    let weeks = ((inner.width.saturating_sub(4) / 2) as usize).clamp(4, 26);
+    let weeks = ((inner.width.saturating_sub(2) / 2) as usize).clamp(1, 53);
     let end = state
         .application
         .today()
@@ -1152,17 +1156,12 @@ fn render_contributions<C: Clock, T: TimeZoneSource>(
             6 - state.application.today().weekday().to_monday_zero_offset(),
         )));
     let start = end.saturating_sub(JiffSpan::new().days((weeks * 7 - 1) as i64));
-    let mut lines = vec![Line::from(vec![
-        Span::styled("    ", muted()),
-        Span::styled(format!("last {weeks} weeks"), muted()),
-    ])];
+    let mut lines = Vec::new();
+    if inner.height >= 8 {
+        lines.push(contribution_month_line(start, weeks));
+    }
     for weekday in 0..7 {
-        let label = match weekday {
-            0 => "M ",
-            2 => "W ",
-            4 => "F ",
-            _ => "  ",
-        };
+        let label = weekday_label(weekday);
         let mut spans = vec![Span::styled(label, muted())];
         for week in 0..weeks {
             let date = start.saturating_add(JiffSpan::new().days((week * 7 + weekday) as i64));
@@ -1176,6 +1175,31 @@ fn render_contributions<C: Clock, T: TimeZoneSource>(
         lines.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn weekday_label(weekday: usize) -> &'static str {
+    ["M ", "T ", "W ", "T ", "F ", "S ", "S "][weekday]
+}
+
+fn contribution_month_line(start: Date, weeks: usize) -> Line<'static> {
+    let mut labels = vec![' '; weeks * 2];
+    for week in 0..weeks {
+        let week_start = start.saturating_add(JiffSpan::new().days((week * 7) as i64));
+        if let Some(month) = (0..7)
+            .map(|day| week_start.saturating_add(JiffSpan::new().days(day)))
+            .find(|date| date.day() == 1)
+        {
+            for (offset, character) in month_abbreviation(month.month()).chars().enumerate() {
+                if let Some(slot) = labels.get_mut(week * 2 + offset) {
+                    *slot = character;
+                }
+            }
+        }
+    }
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(labels.into_iter().collect::<String>(), muted()),
+    ])
 }
 
 fn render_footer<C: Clock, T: TimeZoneSource>(
@@ -1767,26 +1791,37 @@ fn habit_entries(habits: &[TodayHabit], routines: &[Routine]) -> Vec<HabitEntry>
 
 fn contribution_cell(date: Date, today: Date, progress: Option<&DayProgress>) -> Span<'static> {
     if date > today {
-        return Span::styled("·", Style::default().fg(palette::VERMILION_DARK));
+        return blank_contribution_cell();
     }
     let Some(progress) = progress else {
-        return Span::styled("·", Style::default().fg(palette::STONE));
+        return blank_contribution_cell();
     };
     let percentage = progress.percentage();
-    let symbol = match percentage {
-        0 => "░",
-        1..=33 => "▒",
-        34..=66 => "▓",
-        _ => "█",
-    };
-    Span::styled(symbol, contribution_text_style(percentage))
+    contribution_color(percentage).map_or_else(blank_contribution_cell, |color| {
+        Span::styled(CONTRIBUTION_CELL, Style::default().fg(color))
+    })
+}
+
+fn blank_contribution_cell() -> Span<'static> {
+    Span::styled(CONTRIBUTION_CELL, Style::default().fg(palette::SUMI_LIGHT))
+}
+
+fn contribution_color(percentage: u16) -> Option<ratatui::style::Color> {
+    match percentage {
+        0 => None,
+        1..=24 => Some(palette::MOSS_FAINT),
+        25..=49 => Some(palette::MOSS_HALF),
+        50..=74 => Some(palette::MOSS_THREE_QUARTER),
+        _ => Some(palette::MOSS),
+    }
 }
 
 fn contribution_text_style(percentage: u16) -> Style {
     match percentage {
         0 => Style::default().fg(palette::VERMILION_DARK),
-        1..=33 => Style::default().fg(palette::INDIGO),
-        34..=66 => Style::default().fg(palette::GOLD),
+        1..=24 => Style::default().fg(palette::MOSS_FAINT),
+        25..=49 => Style::default().fg(palette::MOSS_HALF),
+        50..=74 => Style::default().fg(palette::MOSS_THREE_QUARTER),
         _ => Style::default()
             .fg(palette::MOSS)
             .add_modifier(Modifier::BOLD),
@@ -1849,6 +1884,12 @@ fn month_name(month: i8) -> &'static str {
         "OCTOBER",
         "NOVEMBER",
         "DECEMBER",
+    ][month as usize - 1]
+}
+
+fn month_abbreviation(month: i8) -> &'static str {
+    [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][month as usize - 1]
 }
 
@@ -2211,11 +2252,70 @@ mod tests {
         let mut state = state();
         state.application.create_daily_binary("read").unwrap();
         state.toggle_selected();
+        state.view = DashboardView::Contributions;
 
         let output = rendered_text(120, 36, &state);
         assert!(output.contains("CONTRIBUTIONS"));
-        assert!(output.contains("last"));
-        assert!(output.contains('█'));
+        assert!(output.contains("Aug"));
+        assert!(!output.contains(['·', '░', '▒', '▓', '█']));
+    }
+
+    #[test]
+    fn contribution_cells_use_exact_green_intensity_bands() {
+        assert_eq!(contribution_color(0), None);
+        assert_eq!(contribution_color(1), Some(palette::MOSS_FAINT));
+        assert_eq!(contribution_color(24), Some(palette::MOSS_FAINT));
+        assert_eq!(contribution_color(25), Some(palette::MOSS_HALF));
+        assert_eq!(contribution_color(49), Some(palette::MOSS_HALF));
+        assert_eq!(contribution_color(50), Some(palette::MOSS_THREE_QUARTER));
+        assert_eq!(contribution_color(74), Some(palette::MOSS_THREE_QUARTER));
+        assert_eq!(contribution_color(75), Some(palette::MOSS));
+        assert_eq!(contribution_color(100), Some(palette::MOSS));
+    }
+
+    #[test]
+    fn contribution_cells_are_square_and_visibly_blank_without_activity() {
+        let date = Date::new(2026, 8, 23).unwrap();
+        let no_activity = DayProgress {
+            date,
+            scheduled: 4,
+            completed: 0,
+        };
+        let active = DayProgress {
+            date,
+            scheduled: 4,
+            completed: 3,
+        };
+
+        let blank = contribution_cell(date, date, Some(&no_activity));
+        assert_eq!(blank.content.as_ref(), CONTRIBUTION_CELL);
+        assert_eq!(blank.style.fg, Some(palette::SUMI_LIGHT));
+        assert_eq!(
+            contribution_cell(date, date, None).style.fg,
+            Some(palette::SUMI_LIGHT)
+        );
+        assert_eq!(
+            contribution_cell(
+                date.saturating_add(JiffSpan::new().days(1)),
+                date,
+                Some(&active)
+            )
+            .style
+            .fg,
+            Some(palette::SUMI_LIGHT)
+        );
+
+        let filled = contribution_cell(date, date, Some(&active));
+        assert_eq!(filled.content.as_ref(), CONTRIBUTION_CELL);
+        assert_eq!(filled.style.fg, Some(palette::MOSS));
+    }
+
+    #[test]
+    fn contribution_grid_labels_every_weekday() {
+        assert_eq!(
+            (0..7).map(weekday_label).collect::<Vec<_>>(),
+            vec!["M ", "T ", "W ", "T ", "F ", "S ", "S "]
+        );
     }
 
     #[test]
@@ -2253,7 +2353,7 @@ mod tests {
         let contributions = rendered_text(52, 30, &state);
         assert_eq!(state.view, DashboardView::Contributions);
         assert!(contributions.contains("CONTRIBUTIONS"));
-        assert!(contributions.contains("last"));
+        assert!(contributions.contains("Aug"));
     }
 
     #[test]
