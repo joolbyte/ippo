@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     config::DataEnvironment,
-    habit::{DayProgress, HabitName, Routine, RoutineName, TodayHabit},
+    habit::{DayProgress, HabitName, ProjectedHabit, Routine, RoutineName, TodayHabit},
 };
 
 const ENVIRONMENT_KEY: &str = "data_environment";
@@ -397,6 +397,48 @@ impl Database {
         Ok(habits)
     }
 
+    pub fn projected_habits(&self, date: &str) -> Result<Vec<ProjectedHabit>, DatabaseError> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT h.id, h.name
+             FROM habits h
+             JOIN habit_schedules s ON s.habit_id = h.id
+             WHERE h.archived_at_utc IS NULL
+               AND s.schedule_kind = 'daily'
+               AND s.starts_on <= ?1
+               AND (s.ends_on IS NULL OR s.ends_on >= ?1)
+             ORDER BY h.created_at_utc, h.id",
+        )?;
+        let rows = statement.query_map([date], |row| {
+            Ok(ProjectedHabit {
+                habit_id: row.get(0)?,
+                name: row.get(1)?,
+                routines: Vec::new(),
+            })
+        })?;
+        let mut habits = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+
+        let mut routine_statement = self.connection.prepare(
+            "SELECT r.id, r.name
+             FROM habit_routines hr
+             JOIN routines r ON r.id = hr.routine_id
+             WHERE hr.habit_id = ?1
+               AND r.archived_at_utc IS NULL
+             ORDER BY hr.position, r.id",
+        )?;
+        for habit in &mut habits {
+            let routines = routine_statement.query_map([habit.habit_id], |row| {
+                Ok(Routine {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            })?;
+            habit.routines = routines.collect::<Result<Vec<_>, _>>()?;
+        }
+
+        Ok(habits)
+    }
+
     pub fn day_progress(
         &self,
         start_date: &str,
@@ -743,5 +785,49 @@ mod tests {
         assert_eq!(progress.len(), 4);
         assert!(progress.iter().all(|day| day.scheduled == 1));
         assert!(progress.iter().all(|day| day.percentage() == 0));
+    }
+
+    #[test]
+    fn future_projection_does_not_create_occurrences_or_contributions() {
+        let mut database =
+            Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
+        database
+            .create_daily_binary_habit(
+                &HabitName::parse("read").unwrap(),
+                "2026-08-24",
+                "Europe/Oslo",
+                "2026-08-24T08:00:00Z",
+            )
+            .unwrap();
+        database
+            .create_routine(
+                &RoutineName::parse("evening").unwrap(),
+                "2026-08-24T08:01:00Z",
+            )
+            .unwrap();
+        let habit_id = database.today_habits("2026-08-24").unwrap()[0].habit_id;
+        let routine_id = database.routines().unwrap()[0].id;
+        database
+            .update_habit_settings(
+                habit_id,
+                &HabitName::parse("read").unwrap(),
+                &[routine_id],
+                "2026-08-24",
+                "2026-08-24T08:02:00Z",
+            )
+            .unwrap();
+
+        let projected = database.projected_habits("2026-08-25").unwrap();
+
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].name, "read");
+        assert_eq!(projected[0].routines[0].name, "evening");
+        assert!(database.today_habits("2026-08-25").unwrap().is_empty());
+        assert!(
+            database
+                .day_progress("2026-08-25", "2026-08-25")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -40,6 +40,13 @@ pub struct TodayHabit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectedHabit {
+    pub habit_id: i64,
+    pub name: String,
+    pub routines: Vec<Routine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Routine {
     pub id: i64,
     pub name: String,

@@ -4,7 +4,8 @@ use thiserror::Error;
 use crate::{
     clock::{Clock, TimeZoneSource},
     habit::{
-        DayProgress, HabitName, HabitNameError, Routine, RoutineName, RoutineNameError, TodayHabit,
+        DayProgress, HabitName, HabitNameError, ProjectedHabit, Routine, RoutineName,
+        RoutineNameError, TodayHabit,
     },
     storage::{Database, DatabaseError},
 };
@@ -17,6 +18,7 @@ pub struct HabitApplication<C, T> {
     selected_date: Date,
     timezone_name: String,
     habits: Vec<TodayHabit>,
+    projected_habits: Vec<ProjectedHabit>,
     routines: Vec<Routine>,
     contributions: Vec<DayProgress>,
 }
@@ -32,6 +34,7 @@ impl<C: Clock, T: TimeZoneSource> HabitApplication<C, T> {
             selected_date: today,
             timezone_name,
             habits: Vec::new(),
+            projected_habits: Vec::new(),
             routines: Vec::new(),
             contributions: Vec::new(),
         };
@@ -51,6 +54,10 @@ impl<C: Clock, T: TimeZoneSource> HabitApplication<C, T> {
         self.selected_date
     }
 
+    pub fn projected_habits(&self) -> &[ProjectedHabit] {
+        &self.projected_habits
+    }
+
     pub fn routines(&self) -> &[Routine] {
         &self.routines
     }
@@ -61,6 +68,10 @@ impl<C: Clock, T: TimeZoneSource> HabitApplication<C, T> {
 
     pub fn is_viewing_today(&self) -> bool {
         self.selected_date == self.today
+    }
+
+    pub fn is_viewing_future(&self) -> bool {
+        self.selected_date > self.today
     }
 
     pub fn completed_count(&self) -> usize {
@@ -89,6 +100,7 @@ impl<C: Clock, T: TimeZoneSource> HabitApplication<C, T> {
     }
 
     pub fn create_routine(&mut self, name: &str) -> Result<(), ApplicationError> {
+        self.require_today()?;
         let name = RoutineName::parse(name)?;
         let now = self.clock.now();
         self.database.create_routine(&name, &now.to_string())?;
@@ -149,6 +161,8 @@ impl<C: Clock, T: TimeZoneSource> HabitApplication<C, T> {
     fn require_today(&self) -> Result<(), ApplicationError> {
         if self.is_viewing_today() {
             Ok(())
+        } else if self.is_viewing_future() {
+            Err(ApplicationError::ReadOnlyFuture(self.selected_date))
         } else {
             Err(ApplicationError::ReadOnlyHistory(self.selected_date))
         }
@@ -162,9 +176,17 @@ impl<C: Clock, T: TimeZoneSource> HabitApplication<C, T> {
                 &now.to_string(),
             )?;
         }
-        self.habits = self
-            .database
-            .today_habits(&self.selected_date.to_string())?;
+        if self.is_viewing_future() {
+            self.habits.clear();
+            self.projected_habits = self
+                .database
+                .projected_habits(&self.selected_date.to_string())?;
+        } else {
+            self.habits = self
+                .database
+                .today_habits(&self.selected_date.to_string())?;
+            self.projected_habits.clear();
+        }
         self.routines = self.database.routines()?;
         let contribution_start = self.today.saturating_sub(Span::new().days(370));
         self.contributions = self
@@ -200,6 +222,8 @@ pub enum ApplicationError {
     UnnamedTimeZone,
     #[error("{0} is historical and read-only; press t to return to today")]
     ReadOnlyHistory(Date),
+    #[error("{0} is an upcoming read-only preview; press t to return to today")]
+    ReadOnlyFuture(Date),
 }
 
 #[cfg(test)]
@@ -284,6 +308,34 @@ mod tests {
         assert!(matches!(
             application.create_daily_binary("must fail"),
             Err(ApplicationError::ReadOnlyHistory(_))
+        ));
+    }
+
+    #[test]
+    fn future_dates_preview_schedules_without_creating_activity() {
+        let database = Database::open_in_memory(DataEnvironment::Test).unwrap();
+        let timestamp: Timestamp = "2026-08-24T12:00:00Z".parse().unwrap();
+        let mut application = HabitApplication::new(
+            database,
+            FixedClock::new(timestamp),
+            FixedTimeZone::new(TimeZone::UTC),
+        )
+        .unwrap();
+        application.create_daily_binary("read").unwrap();
+
+        application.select_date(date(2026, 8, 25)).unwrap();
+
+        assert!(application.is_viewing_future());
+        assert!(application.habits().is_empty());
+        assert_eq!(application.projected_habits()[0].name, "read");
+        assert_eq!(application.contributions().len(), 1);
+        assert!(matches!(
+            application.create_daily_binary("must fail"),
+            Err(ApplicationError::ReadOnlyFuture(_))
+        ));
+        assert!(matches!(
+            application.create_routine("must also fail"),
+            Err(ApplicationError::ReadOnlyFuture(_))
         ));
     }
 }

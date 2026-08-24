@@ -25,7 +25,10 @@ use crate::{
     app::{ApplicationError, HabitApplication},
     clock::{Clock, SystemClock, SystemTimeZone, TimeZoneSource},
     diagnostics::Diagnostics,
-    habit::{DayProgress, MAX_HABIT_NAME_CHARS, MAX_ROUTINE_NAME_CHARS, Routine, TodayHabit},
+    habit::{
+        DayProgress, MAX_HABIT_NAME_CHARS, MAX_ROUTINE_NAME_CHARS, ProjectedHabit, Routine,
+        TodayHabit,
+    },
     storage::Database,
 };
 
@@ -305,11 +308,15 @@ impl<C: Clock, T: TimeZoneSource> TuiState<C, T> {
                     self.begin_create_habit();
                 }
                 KeyCode::Char('r') => {
-                    self.mode = InputMode::CreatingRoutine {
-                        value: String::new(),
-                        error: None,
-                    };
-                    self.notice = None;
+                    if self.application.is_viewing_today() {
+                        self.mode = InputMode::CreatingRoutine {
+                            value: String::new(),
+                            error: None,
+                        };
+                        self.notice = None;
+                    } else {
+                        self.read_only_notice();
+                    }
                 }
                 KeyCode::Char('e') => self.begin_edit_habit(),
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -493,6 +500,11 @@ impl<C: Clock, T: TimeZoneSource> TuiState<C, T> {
                         message: "returned to today".to_owned(),
                         is_error: false,
                     })
+                } else if self.application.is_viewing_future() {
+                    Some(Notice {
+                        message: format!("viewing {} · upcoming preview", date),
+                        is_error: false,
+                    })
                 } else {
                     Some(Notice {
                         message: format!("viewing {} · read-only", date),
@@ -506,10 +518,17 @@ impl<C: Clock, T: TimeZoneSource> TuiState<C, T> {
 
     fn read_only_notice(&mut self) {
         self.notice = Some(Notice {
-            message: format!(
-                "{} is read-only · press t for today",
-                self.application.selected_date()
-            ),
+            message: if self.application.is_viewing_future() {
+                format!(
+                    "{} is an upcoming preview · press t for today",
+                    self.application.selected_date()
+                )
+            } else {
+                format!(
+                    "{} is read-only history · press t for today",
+                    self.application.selected_date()
+                )
+            },
             is_error: true,
         });
     }
@@ -743,19 +762,25 @@ fn render_status<C: Clock, T: TimeZoneSource>(
     .split(inner);
     let headline = Layout::horizontal([Constraint::Min(20), Constraint::Length(12)]).split(rows[0]);
     let completed = state.application.completed_count();
-    let total = state.application.habits().len();
+    let total = if state.application.is_viewing_future() {
+        state.application.projected_habits().len()
+    } else {
+        state.application.habits().len()
+    };
     let percentage = state.application.completion_percentage();
+    let headline_text = if state.application.is_viewing_future() {
+        scheduled_habit_label(total)
+    } else {
+        format!("{percentage}%  {completed} of {total} complete")
+    };
 
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!("{percentage}%"),
-                Style::default()
-                    .fg(palette::WASHI)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {completed} of {total} complete"), muted()),
-        ])),
+        Paragraph::new(Span::styled(
+            headline_text,
+            Style::default()
+                .fg(palette::WASHI)
+                .add_modifier(Modifier::BOLD),
+        )),
         headline[0],
     );
     frame.render_widget(
@@ -779,7 +804,15 @@ fn render_status<C: Clock, T: TimeZoneSource>(
         rows[1],
     );
 
-    let guidance = if !state.application.is_viewing_today() {
+    let guidance = if state.application.is_viewing_future() {
+        Line::from(vec![
+            Span::styled("予定", Style::default().fg(palette::INDIGO)),
+            Span::styled(
+                "  upcoming day · read-only preview · progress begins when this day starts",
+                muted(),
+            ),
+        ])
+    } else if !state.application.is_viewing_today() {
         Line::from(vec![
             Span::styled("履歴", Style::default().fg(palette::INDIGO)),
             Span::styled("  historical view · read-only · press ", muted()),
@@ -810,11 +843,18 @@ fn render_today<C: Clock, T: TimeZoneSource>(
 ) {
     let title = if state.application.is_viewing_today() {
         " 今日  TODAY ".to_owned()
+    } else if state.application.is_viewing_future() {
+        format!(" 予定  UPCOMING · {} ", state.application.selected_date())
     } else {
         format!(" 履歴  {} ", state.application.selected_date())
     };
     let (inner, block) = panel(area, title);
     frame.render_widget(block, area);
+
+    if state.application.is_viewing_future() {
+        render_projected_habits(frame, inner, state);
+        return;
+    }
 
     let habits = state.application.habits();
     if habits.is_empty() {
@@ -823,9 +863,9 @@ fn render_today<C: Clock, T: TimeZoneSource>(
                 Line::from(""),
                 Line::from(Span::styled(
                     if state.application.is_viewing_today() {
-                        "No habits yet."
+                        "No habits scheduled today."
                     } else {
-                        "No scheduled habits for this date."
+                        "No habits were scheduled on this day."
                     },
                     Style::default().fg(palette::WASHI),
                 )),
@@ -892,6 +932,67 @@ fn render_today<C: Clock, T: TimeZoneSource>(
     );
 }
 
+fn render_projected_habits<C: Clock, T: TimeZoneSource>(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &TuiState<C, T>,
+) {
+    let habits = state.application.projected_habits();
+    if habits.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "No habits are currently scheduled for this day.",
+                    Style::default().fg(palette::WASHI),
+                )),
+                Line::from(""),
+                Line::from(Span::styled("Use h/l to browse nearby days.", muted())),
+            ])
+            .alignment(Alignment::Center),
+            area,
+        );
+        return;
+    }
+
+    let groups = habit_groups(habits, state.application.routines());
+    let mut lines = Vec::new();
+    for group in groups {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("┌─ {}", group.name.to_uppercase()),
+                Style::default()
+                    .fg(palette::INDIGO)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  [{} scheduled]", group.habit_indices.len()),
+                muted(),
+            ),
+        ]));
+        for habit_index in group.habit_indices {
+            lines.push(projected_habit_line(&habits[habit_index]));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{} · progress begins when this day starts",
+            scheduled_habit_label(habits.len())
+        ),
+        muted(),
+    )));
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .take(area.height as usize)
+                .collect::<Vec<_>>(),
+        ),
+        area,
+    );
+}
+
 fn render_calendar<C: Clock, T: TimeZoneSource>(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -915,17 +1016,24 @@ fn render_calendar<C: Clock, T: TimeZoneSource>(
         .collect();
     let mut lines = calendar_lines(selected, today, &progress);
     lines.push(Line::from(""));
-    let summary = progress.get(&selected).map_or_else(
-        || format!("{selected}  ·  no habits"),
-        |day| {
-            format!(
-                "{selected}  ·  {}%  [{}/{}]",
-                day.percentage(),
-                day.completed,
-                day.scheduled
-            )
-        },
-    );
+    let summary = if state.application.is_viewing_future() {
+        format!(
+            "{selected}  ·  {}",
+            scheduled_habit_label(state.application.projected_habits().len())
+        )
+    } else {
+        progress.get(&selected).map_or_else(
+            || format!("{selected}  ·  no habits"),
+            |day| {
+                format!(
+                    "{selected}  ·  {}%  [{}/{}]",
+                    day.percentage(),
+                    day.completed,
+                    day.scheduled
+                )
+            },
+        )
+    };
     lines.push(Line::from(Span::styled(
         summary,
         Style::default().fg(palette::MOSS),
@@ -1029,6 +1137,21 @@ fn render_footer<C: Clock, T: TimeZoneSource>(
     }
 
     if area.width < MEDIUM_TERMINAL_MIN_COLUMNS {
+        if !state.application.is_viewing_today() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    key("h/l"),
+                    Span::styled(" date  ", muted()),
+                    key("t"),
+                    Span::styled(" today  ", muted()),
+                    key("tab"),
+                    Span::styled(" view", muted()),
+                ]))
+                .block(footer_block()),
+                area,
+            );
+            return;
+        }
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 key("n"),
@@ -1049,6 +1172,43 @@ fn render_footer<C: Clock, T: TimeZoneSource>(
         return;
     }
 
+    if !state.application.is_viewing_today() {
+        let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                key("h/l"),
+                Span::styled(" date   ", muted()),
+                key("t"),
+                Span::styled(" today   ", muted()),
+                key("tab"),
+                Span::styled(" view", muted()),
+            ]))
+            .block(footer_block()),
+            columns[0],
+        );
+        let message = state.notice.as_ref().map_or_else(
+            || {
+                if state.application.is_viewing_future() {
+                    format!(
+                        "viewing {} · upcoming preview",
+                        state.application.selected_date()
+                    )
+                } else {
+                    format!("viewing {} · read-only", state.application.selected_date())
+                }
+            },
+            |notice| notice.message.clone(),
+        );
+        frame.render_widget(
+            Paragraph::new(message)
+                .alignment(Alignment::Right)
+                .style(Style::default().fg(palette::MOSS))
+                .block(footer_block()),
+            columns[1],
+        );
+        return;
+    }
     let columns = Layout::horizontal([Constraint::Min(48), Constraint::Length(34)]).split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1350,15 +1510,40 @@ fn habit_line(habit: &TodayHabit, selected: bool) -> Line<'static> {
     ])
 }
 
+fn projected_habit_line(habit: &ProjectedHabit) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("│  ", Style::default().fg(palette::VERMILION_DARK)),
+        Span::styled("○", Style::default().fg(palette::STONE)),
+        Span::raw(" "),
+        Span::styled(habit.name.clone(), Style::default().fg(palette::WASHI)),
+    ])
+}
+
 struct HabitGroup {
     name: String,
     routine_id: Option<i64>,
     habit_indices: Vec<usize>,
 }
 
-fn habit_groups(habits: &[TodayHabit], routines: &[Routine]) -> Vec<HabitGroup> {
+trait GroupedHabit {
+    fn routines(&self) -> &[Routine];
+}
+
+impl GroupedHabit for TodayHabit {
+    fn routines(&self) -> &[Routine] {
+        &self.routines
+    }
+}
+
+impl GroupedHabit for ProjectedHabit {
+    fn routines(&self) -> &[Routine] {
+        &self.routines
+    }
+}
+
+fn habit_groups<H: GroupedHabit>(habits: &[H], routines: &[Routine]) -> Vec<HabitGroup> {
     let mut known_routines: Vec<Routine> = routines.to_vec();
-    for routine in habits.iter().flat_map(|habit| &habit.routines) {
+    for routine in habits.iter().flat_map(GroupedHabit::routines) {
         if !known_routines.iter().any(|known| known.id == routine.id) {
             known_routines.push(routine.clone());
         }
@@ -1371,7 +1556,7 @@ fn habit_groups(habits: &[TodayHabit], routines: &[Routine]) -> Vec<HabitGroup> 
             .enumerate()
             .filter(|(_, habit)| {
                 habit
-                    .routines
+                    .routines()
                     .iter()
                     .any(|assigned| assigned.id == routine.id)
             })
@@ -1389,7 +1574,7 @@ fn habit_groups(habits: &[TodayHabit], routines: &[Routine]) -> Vec<HabitGroup> 
     let ungrouped: Vec<_> = habits
         .iter()
         .enumerate()
-        .filter(|(_, habit)| habit.routines.is_empty())
+        .filter(|(_, habit)| habit.routines().is_empty())
         .map(|(index, _)| index)
         .collect();
     if !ungrouped.is_empty() {
@@ -1443,6 +1628,13 @@ fn contribution_text_style(percentage: u16) -> Style {
             .fg(palette::MOSS)
             .add_modifier(Modifier::BOLD),
     }
+}
+
+fn scheduled_habit_label(count: usize) -> String {
+    format!(
+        "{count} habit{} scheduled",
+        if count == 1 { "" } else { "s" }
+    )
 }
 
 fn shift_month(date: Date, offset: i8) -> Date {
@@ -1639,7 +1831,7 @@ mod tests {
         assert!(output.contains("ippo"));
         assert!(output.contains("DEVELOPMENT"));
         assert!(output.contains("0%"));
-        assert!(output.contains("No habits yet"));
+        assert!(output.contains("No habits scheduled today"));
         assert!(output.contains("CONTRIBUTIONS"));
         assert!(!output.contains("drink water"));
         assert!(!output.contains("level 7"));
@@ -1781,6 +1973,30 @@ mod tests {
     }
 
     #[test]
+    fn future_date_renders_a_grouped_upcoming_preview() {
+        let mut state = state();
+        state.application.create_daily_binary("read").unwrap();
+        state.application.create_routine("evening").unwrap();
+        let habit_id = state.application.habits()[0].habit_id;
+        let routine_id = state.application.routines()[0].id;
+        state
+            .application
+            .update_habit_settings(habit_id, "read", &[routine_id])
+            .unwrap();
+
+        state.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        let output = rendered_text(120, 36, &state);
+
+        assert!(output.contains("UPCOMING · 2026-08-24"));
+        assert!(output.contains("upcoming day · read-only preview"));
+        assert!(output.contains("EVENING"));
+        assert!(output.contains("read"));
+        assert!(output.contains("1 habit scheduled"));
+        assert!(output.contains("viewing 2026-08-24 · upcoming preview"));
+        assert!(state.application.habits().is_empty());
+    }
+
+    #[test]
     fn contribution_panel_renders_persisted_completion_intensity() {
         let mut state = state();
         state.application.create_daily_binary("read").unwrap();
@@ -1797,7 +2013,7 @@ mod tests {
         let output = rendered_text(52, 30, &state());
 
         assert!(output.contains("0%"));
-        assert!(output.contains("No habits yet"));
+        assert!(output.contains("No habits scheduled today"));
         assert!(output.contains("new"));
         assert!(!output.contains("recent consistency"));
     }
@@ -1808,7 +2024,7 @@ mod tests {
 
         assert!(output.contains("STATUS"));
         assert!(output.contains("TODAY"));
-        assert!(output.contains("No habits yet"));
+        assert!(output.contains("No habits scheduled today"));
         assert!(!output.contains("recent consistency"));
     }
 

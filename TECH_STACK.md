@@ -166,7 +166,7 @@ Completion updates must change the dated occurrence, never the habit definition.
 
 Routine membership uses a many-to-many definition table. Dated occurrences snapshot both their habit display name and routine memberships, including routine names and ordering, so later settings changes do not relabel earlier history. Editing a habit may refresh the active day's snapshot, but it must not rewrite prior occurrence snapshots.
 
-Daily schedules are reconciled through the current civil date when the application starts or detects a day rollover. This materializes missed scheduled days as incomplete occurrences, allowing calendar history and contribution aggregation to distinguish a real zero-completion day from an unscheduled day. Contribution percentages are aggregated from dated occurrence rows in SQLite and rendered from view-ready application data; rendering code does not calculate persistence semantics.
+Daily schedules are reconciled through the current civil date when the application starts or detects a day rollover. This materializes missed scheduled days as incomplete occurrences, allowing calendar history and contribution aggregation to distinguish a real zero-completion day from an unscheduled day. Future-date browsing projects the current definitions, schedules, and routine memberships through a read-only query; it must not materialize occurrence rows or contribution activity before that civil date begins. Contribution percentages are aggregated from dated occurrence rows in SQLite and rendered from view-ready application data; rendering code does not calculate persistence semantics.
 
 ## Rusqlite with bundled SQLite
 

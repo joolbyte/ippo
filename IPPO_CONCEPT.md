@@ -103,7 +103,9 @@ The application should reason about a habit as a definition and each scheduled d
 
 Historical records should remain truthful. Editing today's habit definition must not silently rewrite what the user actually did in the past.
 
-The first habit-settings surface edits a binary habit's current name and routine memberships. Those changes update today's occurrence so the active dashboard responds immediately, while earlier occurrence names and routine memberships remain unchanged. Schedule, type, pause, and archive controls require their own explicit lifecycle rules before joining this surface.
+The first habit-settings surface edits a binary habit's current name and routine memberships. Those changes update today's occurrence so the active dashboard responds immediately, while earlier occurrence names and routine memberships remain unchanged. Schedule, type, and pause controls require their own explicit lifecycle rules before joining this surface.
+
+Archiving is the only habit-removal action; ippo does not offer destructive habit deletion. Archiving a habit takes effect immediately: it disappears from Today, is excluded from the current day's completion calculation, and produces no future occurrences or projected appearances. Any occurrence already materialized for the archive date remains stored as an excluded lifecycle record rather than being deleted or later presented as a missed habit. Occurrences on earlier dates remain visible and unchanged in history, and their contribution calculations retain the semantics they had on those dates.
 
 ### Completions and progress
 
@@ -186,13 +188,13 @@ Missing, unscheduled, future, and zero-completion days must be represented delib
 
 Users should be able to return to a past date and understand what was scheduled, what was completed, the progress recorded, and any writing saved that day.
 
-Calendar browsing initially moves by day or month and loads the selected date into the dashboard. Past and future dates are read-only; the user can return to today with one key. This keeps historical inspection safe until explicit historical-correction semantics are designed.
+Calendar browsing initially moves by day or month and loads the selected date into the dashboard. Past dates show read-only occurrence history. Future dates show a read-only preview projected from the current habit schedules and routine memberships, clearly labeled as upcoming rather than historical. The preview does not create future occurrences or contribution activity. The user can return to today with one key. This keeps historical inspection safe until explicit historical-correction semantics are designed while making persistence and upcoming schedules understandable.
 
 Today, Calendar, and Contributions are keyboard-focusable views as well as dashboard areas. Compact terminals must keep all three reachable instead of silently hiding historical features because there is not enough room to render every panel at once.
 
 History should support reflection rather than shame. Missed days are data, not failures that require punitive messaging.
 
-Habits should generally be archived instead of destructively deleted when historical data exists.
+Habits are archived rather than destructively deleted. Archive controls belong in habit settings and must use an explicit confirmation flow. Archived habits disappear from the current and future daily experience without erasing or relabeling earlier history.
 
 ## Levels, XP, and streaks
 
@@ -298,6 +300,7 @@ The following are established product decisions:
 - The contribution graph uses completion percentage for intensity.
 - XP and levels exist only for motivation and never unlock features.
 - Writing/reflection is a habit type with a configurable minimum character count and locally stored dated entries.
+- Archiving is the only habit-removal action. It takes effect for the current and future dates while preserving earlier occurrence history; destructive habit deletion is not offered.
 - SQLite is the intended local persistence layer.
 - The implementation uses Rust, Ratatui, Crossterm, and the supporting components recorded in [`TECH_STACK.md`](./TECH_STACK.md).
 - Personal use, manual development, and automated tests use separate data environments and must never share a writable SQLite database.
