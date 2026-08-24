@@ -18,7 +18,7 @@ The first real habit loop is available in the TUI:
 
 - Press `n`, enter a name, and press `Enter` to create a daily binary habit.
 - Move through today's habits with `j`/`k` or the arrow keys.
-- Press `Space` to toggle the selected habit's completion for today.
+- Press `Space` to toggle the selected habit's completion for today. Completed habits move below all unchecked habits.
 - Press `q` or `Esc` to quit. Habits and dated completion state survive restart.
 
 To intentionally run against your personal profile while developing:

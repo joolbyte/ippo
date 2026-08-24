@@ -189,9 +189,34 @@ impl<C: Clock, T: TimeZoneSource> TuiState<C, T> {
         };
         let occurrence_id = habit.occurrence_id;
         let habit_name = habit.name.clone();
+        let was_completed = habit.completed;
+        let previous_selection = self.selected;
 
         match self.application.toggle(occurrence_id) {
             Ok(()) => {
+                let toggled_position = self
+                    .application
+                    .habits()
+                    .iter()
+                    .position(|habit| habit.occurrence_id == occurrence_id)
+                    .unwrap_or(0);
+
+                self.selected = if was_completed {
+                    toggled_position
+                } else {
+                    let unchecked_count = self
+                        .application
+                        .habits()
+                        .iter()
+                        .filter(|habit| !habit.completed)
+                        .count();
+
+                    if unchecked_count == 0 {
+                        toggled_position
+                    } else {
+                        previous_selection.min(unchecked_count - 1)
+                    }
+                };
                 self.notice = Some(Notice {
                     message: format!("updated ‘{habit_name}’"),
                     is_error: false,
@@ -987,6 +1012,43 @@ mod tests {
         state.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         assert!(state.application.habits()[0].completed);
         assert_eq!(state.application.completion_percentage(), 100);
+    }
+
+    #[test]
+    fn completing_a_habit_moves_it_below_unchecked_habits_and_advances_focus() {
+        let mut state = state();
+        for name in ["first", "second", "third"] {
+            state.application.create_daily_binary(name).unwrap();
+        }
+        state.selected = 1;
+
+        state.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        let names: Vec<_> = state
+            .application
+            .habits()
+            .iter()
+            .map(|habit| habit.name.as_str())
+            .collect();
+        assert_eq!(names, ["first", "third", "second"]);
+        assert_eq!(state.application.habits()[state.selected].name, "third");
+    }
+
+    #[test]
+    fn unchecking_a_completed_habit_keeps_it_selected() {
+        let mut state = state();
+        for name in ["first", "second"] {
+            state.application.create_daily_binary(name).unwrap();
+        }
+        state.selected = 0;
+        state.toggle_selected();
+        assert_eq!(state.application.habits()[state.selected].name, "second");
+
+        state.selected = 1;
+        state.toggle_selected();
+
+        assert_eq!(state.application.habits()[state.selected].name, "first");
+        assert!(!state.application.habits()[state.selected].completed);
     }
 
     #[test]

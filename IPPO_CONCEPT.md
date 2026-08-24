@@ -113,6 +113,8 @@ Examples:
 
 The application's daily completion percentage should be based on the progress of the habits scheduled for that day. The exact weighting policy must be explicit, consistent, and testable.
 
+In the Today view, unchecked habits appear first in their normal order. Completing a habit moves it below all unchecked habits without changing its historical record, keeping the next unfinished action easy to reach.
+
 ## Writing and lightweight journaling
 
 Writing is a first-class habit type, not a separate general-purpose notes application.

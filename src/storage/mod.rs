@@ -179,7 +179,7 @@ impl Database {
              JOIN habits h ON h.id = o.habit_id
              WHERE o.scheduled_date = ?1
                AND h.archived_at_utc IS NULL
-             ORDER BY h.created_at_utc, h.id",
+             ORDER BY o.completed ASC, h.created_at_utc, h.id",
         )?;
         let rows = statement.query_map([date], |row| {
             Ok(TodayHabit {
@@ -333,5 +333,34 @@ mod tests {
             )
             .unwrap();
         assert!(database.today_habits("2026-08-23").unwrap()[0].completed);
+    }
+
+    #[test]
+    fn completed_occurrences_follow_unchecked_occurrences() {
+        let mut database =
+            Database::open_in_memory(DataEnvironment::Test).expect("database should initialize");
+
+        for name in ["first", "second", "third"] {
+            database
+                .create_daily_binary_habit(
+                    &HabitName::parse(name).unwrap(),
+                    "2026-08-23",
+                    "Europe/Oslo",
+                    "2026-08-23T08:00:00Z",
+                )
+                .unwrap();
+        }
+
+        let second_occurrence = database.today_habits("2026-08-23").unwrap()[1].occurrence_id;
+        database
+            .toggle_binary_occurrence(second_occurrence, "2026-08-23", "2026-08-23T08:05:00Z")
+            .unwrap();
+
+        let habits = database.today_habits("2026-08-23").unwrap();
+        let names: Vec<_> = habits.iter().map(|habit| habit.name.as_str()).collect();
+        let completions: Vec<_> = habits.iter().map(|habit| habit.completed).collect();
+
+        assert_eq!(names, ["first", "third", "second"]);
+        assert_eq!(completions, [false, false, true]);
     }
 }
